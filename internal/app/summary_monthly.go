@@ -2,6 +2,7 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,10 +49,33 @@ func ensureMonthly(cfg Config, db *sql.DB, monthKey string, force bool) error {
 		return nil
 	}
 
+	// ---------- MONTH DATE RANGE ----------
+	t, err := time.ParseInLocation("2006-01", monthKey, cfg.Location)
+	if err != nil {
+		return nil
+	}
+	startT, endT := monthRange(t, cfg.Location)
+	monthStart := startT.Format("2006-01-02")
+	monthEnd := endT.Format("2006-01-02")
+
+	// ---------- WEEKLY_JSON_ARRAY ----------
+	raws := make([]json.RawMessage, 0, len(weeklies))
+	for _, s := range weeklies {
+		ss := strings.TrimSpace(s)
+		if ss == "" {
+			continue
+		}
+		raws = append(raws, json.RawMessage(ss))
+	}
+	arrBytes, _ := json.Marshal(raws)
+	weeklyJSONArray := string(arrBytes)
+
 	// ---------- BUILD PROMPT ----------
 	prompt := mustReadPrompt(cfg, "monthly.txt")
 	prompt = strings.ReplaceAll(prompt, "{{MONTH}}", monthKey)
-	prompt = strings.ReplaceAll(prompt, "{{WEEKLIES}}", strings.Join(weeklies, "\n\n"))
+	prompt = strings.ReplaceAll(prompt, "{{MONTH_START}}", monthStart)
+	prompt = strings.ReplaceAll(prompt, "{{MONTH_END}}", monthEnd)
+	prompt = strings.ReplaceAll(prompt, "{{WEEKLY_JSON_ARRAY}}", weeklyJSONArray)
 
 	// ---------- CALL LLM ----------
 	out, err := callLLMNonStream(prompt)
@@ -71,8 +95,8 @@ func ensureMonthly(cfg Config, db *sql.DB, monthKey string, force bool) error {
 		cfg,
 		"monthly",
 		monthKey,
-		monthKey,
-		monthKey,
+		monthStart,
+		monthEnd,
 		out,
 		indexText,
 		outPath,

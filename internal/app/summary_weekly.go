@@ -2,6 +2,7 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,10 +49,37 @@ func ensureWeekly(cfg Config, db *sql.DB, weekKey string, force bool) error {
 		return nil
 	}
 
+	// ---------- WEEK DATE RANGE ----------
+	year, week := parseWeekKey(weekKey)
+	ref := time.Date(year, 1, 4, 0, 0, 0, 0, cfg.Location)
+	for {
+		y, w := ref.ISOWeek()
+		if y == year && w == week {
+			break
+		}
+		ref = ref.AddDate(0, 0, 1)
+	}
+	startT, endT := weekRange(ref, cfg.Location)
+	weekStart := startT.Format("2006-01-02")
+	weekEnd := endT.Format("2006-01-02")
+
+	// ---------- DAILY_JSON_ARRAY ----------
+	raws := make([]json.RawMessage, 0, len(dailies))
+	for _, s := range dailies {
+		ss := strings.TrimSpace(s)
+		if ss == "" {
+			continue
+		}
+		raws = append(raws, json.RawMessage(ss))
+	}
+	arr, _ := json.Marshal(raws)
+	dailyJSONArray := string(arr)
+
 	// ---------- BUILD PROMPT ----------
 	prompt := mustReadPrompt(cfg, "weekly.txt")
-	prompt = strings.ReplaceAll(prompt, "{{WEEK}}", weekKey)
-	prompt = strings.ReplaceAll(prompt, "{{DAILIES}}", strings.Join(dailies, "\n\n"))
+	prompt = strings.ReplaceAll(prompt, "{{WEEK_START}}", weekStart)
+	prompt = strings.ReplaceAll(prompt, "{{WEEK_END}}", weekEnd)
+	prompt = strings.ReplaceAll(prompt, "{{DAILY_JSON_ARRAY}}", dailyJSONArray)
 
 	// ---------- CALL LLM ----------
 	out, err := callLLMNonStream(prompt)
@@ -71,8 +99,8 @@ func ensureWeekly(cfg Config, db *sql.DB, weekKey string, force bool) error {
 		cfg,
 		"weekly",
 		weekKey,
-		weekKey,
-		weekKey,
+		weekStart,
+		weekEnd,
 		out,
 		indexText,
 		outPath,
@@ -101,7 +129,6 @@ func parseWeekKey(weekKey string) (year int, week int) {
 func collectDailySummariesForWeek(cfg Config, weekKey string) []string {
 	year, week := parseWeekKey(weekKey)
 
-	// ISO 官方推荐：用 1 月 4 日作为基准，找到落在该 ISO 周的日期
 	ref := time.Date(year, 1, 4, 0, 0, 0, 0, cfg.Location)
 	for {
 		y, w := ref.ISOWeek()
@@ -111,7 +138,6 @@ func collectDailySummariesForWeek(cfg Config, weekKey string) []string {
 		ref = ref.AddDate(0, 0, 1)
 	}
 
-	// 使用你已有的 weekRange（不要重复造）
 	start, end := weekRange(ref, cfg.Location)
 
 	var out []string
