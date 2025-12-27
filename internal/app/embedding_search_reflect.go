@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"database/sql"
 	"encoding/binary"
@@ -78,11 +79,11 @@ func ensureEmbedding(db *sql.DB, cfg Config, text, typ, key string) error {
 
 /*
 ========================
-CLI Command Router（修复版）
+CLI Command Router
 ========================
 */
 
-func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, input string) {
+func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, reader *bufio.Reader, input string) {
 	switch {
 
 	case input == "/help":
@@ -91,11 +92,9 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, input string) {
 
 /chat <msg>                   chat with memory context
 /ask <question>               ask with memory context
-/ask <question> --refs        include top-N memory references
-
 /search <query>               semantic search summaries
 
-/daily                        generate today's daily summary (idempotent)
+/daily                        generate today's daily summary
 /daily --force                regenerate today's daily summary
 
 /weekly                       generate current week's summary
@@ -109,7 +108,33 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, input string) {
 /remember <fact>              explicitly teach the system a confirmed fact
 /forget <fact>                explicitly retract a previously remembered fact
 
+/paste                        enter multi-line input (empty line submits)
 `)
+
+	// ---------- PASTE ----------
+	case input == "/paste":
+		fmt.Println("(paste mode, empty line to submit)")
+		msg, err := readMultiline(reader)
+		if err != nil {
+			fmt.Println("input error:", err)
+			return
+		}
+
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			return
+		}
+
+		fmt.Println("\nAssistant>")
+		if DefaultUseLongTermChat {
+			if err := Chat(lw, cfg, db, msg); err != nil {
+				fmt.Println("chat error:", err)
+			}
+		} else {
+			answer := streamChat(msg)
+			_ = lw.WriteRecord(map[string]string{"role": "user", "content": msg})
+			_ = lw.WriteRecord(map[string]string{"role": "assistant", "content": answer})
+		}
 
 	// ---------- SEARCH ----------
 	case strings.HasPrefix(input, "/search "):
@@ -139,93 +164,55 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, input string) {
 		}
 		fmt.Println(ans)
 
-		// ---------- REMEMBER ----------
-	case strings.HasPrefix(input, "/remember "):
-		content := strings.TrimSpace(strings.TrimPrefix(input, "/remember "))
-		if content == "" {
-			fmt.Println("usage: /remember <fact>")
-			return
-		}
-		if err := RememberFact(lw, cfg, db, content); err != nil {
-			fmt.Println("remember error:", err)
-		} else {
-			fmt.Println("[ok] fact recorded, will be persisted in daily summary")
-		}
-
-	case strings.HasPrefix(input, "/forget "):
-		content := strings.TrimSpace(strings.TrimPrefix(input, "/forget "))
-		if content == "" {
-			fmt.Println("usage: /forget <fact>")
-			return
-		}
-		if err := ForgetFact(lw, cfg, db, content); err != nil {
-			fmt.Println("forget error:", err)
-		} else {
-			fmt.Println("[ok] fact retracted, will be reflected in daily summary")
-		}
-
 	// ---------- CHAT ----------
 	case strings.HasPrefix(input, "/chat "):
 		raw := strings.TrimPrefix(input, "/chat ")
+		fmt.Println("\nAssistant>")
 		if err := Chat(lw, cfg, db, raw); err != nil {
 			fmt.Println("chat error:", err)
 		}
+
+	// ---------- REMEMBER ----------
+	case strings.HasPrefix(input, "/remember "):
+		content := strings.TrimSpace(strings.TrimPrefix(input, "/remember "))
+		if err := RememberFact(lw, cfg, db, content); err != nil {
+			fmt.Println("remember error:", err)
+		} else {
+			fmt.Println("[ok] fact recorded")
+		}
+
+	// ---------- FORGET ----------
+	case strings.HasPrefix(input, "/forget "):
+		content := strings.TrimSpace(strings.TrimPrefix(input, "/forget "))
+		if err := ForgetFact(lw, cfg, db, content); err != nil {
+			fmt.Println("forget error:", err)
+		} else {
+			fmt.Println("[ok] fact retracted")
+		}
+
 	// ---------- DAILY ----------
 	case strings.HasPrefix(input, "/daily"):
-		parts := strings.Fields(input)
-		force := len(parts) > 1 && parts[1] == "--force"
-
+		force := strings.Contains(input, "--force")
 		today := time.Now().In(cfg.Location).Format("2006-01-02")
+		_ = ensureDaily(cfg, db, today, force)
+		fmt.Println("[ok] daily summary ensured:", today)
 
-		if err := ensureDaily(cfg, db, today, force); err != nil {
-			fmt.Println("daily error:", err)
-			return
-		}
-
-		if force {
-			fmt.Println("[ok] daily summary regenerated:", today)
-		} else {
-			fmt.Println("[ok] daily summary ensured:", today)
-		}
-
-		// ---------- WEEKLY ----------
+	// ---------- WEEKLY ----------
 	case strings.HasPrefix(input, "/weekly"):
-		parts := strings.Fields(input)
-		force := len(parts) > 1 && parts[1] == "--force"
-
-		now := time.Now().In(cfg.Location)
-		year, week := now.ISOWeek()
-		weekKey := fmt.Sprintf("%04d-W%02d", year, week)
-
-		if err := ensureWeekly(cfg, db, weekKey, force); err != nil {
-			fmt.Println("weekly error:", err)
-			return
-		}
-
-		if force {
-			fmt.Println("[ok] weekly summary regenerated:", weekKey)
-		} else {
-			fmt.Println("[ok] weekly summary ensured:", weekKey)
-		}
+		force := strings.Contains(input, "--force")
+		y, w := time.Now().In(cfg.Location).ISOWeek()
+		key := fmt.Sprintf("%04d-W%02d", y, w)
+		_ = ensureWeekly(cfg, db, key, force)
+		fmt.Println("[ok] weekly summary ensured:", key)
 
 	// ---------- MONTHLY ----------
 	case strings.HasPrefix(input, "/monthly"):
-		parts := strings.Fields(input)
-		force := len(parts) > 1 && parts[1] == "--force"
+		force := strings.Contains(input, "--force")
+		key := time.Now().In(cfg.Location).Format("2006-01")
+		_ = ensureMonthly(cfg, db, key, force)
+		fmt.Println("[ok] monthly summary ensured:", key)
 
-		monthKey := time.Now().In(cfg.Location).Format("2006-01")
-
-		if err := ensureMonthly(cfg, db, monthKey, force); err != nil {
-			fmt.Println("monthly error:", err)
-			return
-		}
-
-		if force {
-			fmt.Println("[ok] monthly summary regenerated:", monthKey)
-		} else {
-			fmt.Println("[ok] monthly summary ensured:", monthKey)
-		}
-
+	// ---------- REINDEX ----------
 	case strings.HasPrefix(input, "/reindex"):
 		parts := strings.Fields(input)
 		target := "daily"
@@ -235,11 +222,6 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, input string) {
 		if err := Reindex(db, cfg, target); err != nil {
 			fmt.Println("reindex error:", err)
 		}
-
-		// ---------- DEBUG CHAT ----------
-	case strings.HasPrefix(input, "/debug chat "):
-		raw := strings.TrimPrefix(input, "/debug chat ")
-		DebugChat(cfg, db, raw)
 
 	default:
 		fmt.Println("unknown command, try /help")

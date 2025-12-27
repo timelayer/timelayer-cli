@@ -1,117 +1,114 @@
 package app
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
-
-	"github.com/chzyer/readline"
 )
 
 /*
 ================================================
 RUN MODE SWITCH（唯一需要改的地方）
 ------------------------------------------------
-true  = 默认聊天即“长期记忆自我”（推荐 / 当前模式）
-false = 默认聊天仅即时回答（streamChat，不进长期上下文）
+true  = 默认聊天即“长期记忆自我”（推荐）
+false = 默认聊天仅即时回答（streamChat）
 ================================================
 */
 const DefaultUseLongTermChat = true
 
+// ==============================
+// Run（最终 UX 版）
+// ==============================
 func Run() {
 	// ------------------------------
-	// 0️⃣ 基础初始化（配置 / 目录 / prompt）
+	// 0️⃣ 初始化
 	// ------------------------------
 	cfg := defaultConfig()
 	mustEnsureDirs(cfg)
 	mustEnsurePromptFiles(cfg)
 
-	// ------------------------------
-	// 1️⃣ 数据库 & 日志系统
-	// ------------------------------
 	db := mustOpenDB(cfg)
 	defer db.Close()
 
 	lw := NewLogWriter(cfg, db)
 	defer lw.Close()
 
-	// ------------------------------
-	// 2️⃣ CLI 输入
-	// ------------------------------
-	rl, _ := readline.New("You> ")
-	defer rl.Close()
+	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Println("🧠 Local AI Chat")
 	fmt.Println("Type exit to quit, /help for commands")
+	fmt.Println()
 
 	// ==============================
-	// 3️⃣ 主循环
+	// 1️⃣ 主循环
 	// ==============================
 	for {
-		line, err := rl.Readline()
+		fmt.Print("You> ")
+
+		line, err := readLine(reader)
 		if err != nil {
+			fmt.Println("\nbye")
 			return
 		}
 
-		input := strings.TrimSpace(line)
-		if input == "" {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
 
 		// 统一退出
-		if input == "exit" {
+		if line == "exit" {
 			return
 		}
 
 		// ------------------------------
-		// 4️⃣ 命令模式（/ask /chat /weekly /monthly …）
+		// 2️⃣ 命令模式（/xxx）
 		// ------------------------------
-		// 命令永远走 handleCommand，不受 DefaultUseLongTermChat 影响
-		if strings.HasPrefix(input, "/") {
-			handleCommand(cfg, db, lw, line)
+		if strings.HasPrefix(line, "/") {
+			handleCommand(cfg, db, lw, reader, line)
+			fmt.Println("\n------------------\n")
 			continue
 		}
 
 		// ------------------------------
-		// 5️⃣ 默认聊天入口（关键语义分流点）
+		// 3️⃣ Markdown fence 多行
+		// ------------------------------
+		var input string
+		if line == "```" {
+			input, err = readUntilFence(reader)
+			if err != nil {
+				fmt.Println("input error:", err)
+				fmt.Println("\n------------------\n")
+				continue
+			}
+		} else {
+			// 默认单行
+			input = line
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			fmt.Println("\n------------------\n")
+			continue
+		}
+
+		// ------------------------------
+		// 4️⃣ 默认聊天入口
 		// ------------------------------
 		fmt.Println("\nAssistant>")
 
 		if DefaultUseLongTermChat {
-			/*
-				长期记忆自我（推荐模式）
-
-				语义：
-				- 每次输入都会：
-				  1) 写 user raw
-				  2) 构建长期上下文（历史 / summary / embedding）
-				  3) 使用 context 流式回答
-				  4) 写 assistant raw
-
-				注意：
-				- Chat() 内部已经调用 streamChatWithContext()
-				- 这里【绝对不要】再调用 streamChat()
-			*/
 			if err := Chat(lw, cfg, db, input); err != nil {
 				fmt.Println("chat error:", err)
 			}
-
 		} else {
-			/*
-				即时自我（旧模式 / 轻量模式）
-
-				语义：
-				- 不使用长期上下文
-				- 只做即时回答
-				- 但仍然写 raw log（供 daily / weekly / monthly 使用）
-			*/
-
 			answer := streamChat(input)
 
 			_ = lw.WriteRecord(map[string]string{
 				"role":    "user",
 				"content": input,
 			})
-
 			_ = lw.WriteRecord(map[string]string{
 				"role":    "assistant",
 				"content": answer,
@@ -120,4 +117,60 @@ func Run() {
 
 		fmt.Println("\n------------------\n")
 	}
+}
+
+// ==============================
+// 输入工具函数
+// ==============================
+
+// readLine：读取单行（canonical stdin）
+func readLine(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// readMultiline：空行提交（用于 /paste）
+func readMultiline(r *bufio.Reader) (string, error) {
+	var lines []string
+
+	for {
+		line, err := readLine(r)
+		if err != nil {
+			if len(lines) > 0 {
+				break
+			}
+			return "", err
+		}
+
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n"), nil
+}
+
+// readUntilFence：``` 结束
+func readUntilFence(r *bufio.Reader) (string, error) {
+	var lines []string
+
+	for {
+		line, err := readLine(r)
+		if err != nil {
+			return "", err
+		}
+
+		if strings.TrimSpace(line) == "```" {
+			break
+		}
+
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n"), nil
 }
