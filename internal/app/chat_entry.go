@@ -18,6 +18,7 @@ func Chat(lw *LogWriter, cfg Config, db *sql.DB, input string) error {
 	})
 
 	// === 2️⃣ 构建上下文（历史 / 事实） ===
+	// 注意：这里的 BuildChatContext 里不要再注入 user input（否则会重复一次）
 	date := now.Format("2006-01-02")
 	blocks := BuildChatContext(cfg, db, date, input)
 

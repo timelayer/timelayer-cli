@@ -16,12 +16,19 @@ func extractIndexText(summaryJSON string) string {
 	var collect func(any)
 	collect = func(v any) {
 		switch x := v.(type) {
+
 		case string:
-			parts = append(parts, x)
+			s := strings.TrimSpace(x)
+			// ✅ 降噪规则：太短 / 太长的文本不进入 embedding
+			if runeLen(s) >= 2 && runeLen(s) <= 200 {
+				parts = append(parts, s)
+			}
+
 		case []any:
 			for _, it := range x {
 				collect(it)
 			}
+
 		case map[string]any:
 			for _, vv := range x {
 				collect(vv)

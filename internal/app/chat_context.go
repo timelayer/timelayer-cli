@@ -14,22 +14,22 @@ PromptBlock 表示一段被注入到 LLM Prompt 中的上下文块。
 */
 type PromptBlock struct {
 	Role    string // system | user | assistant
-	Source  string // daily_summary | search_hit | recent_raw | user_input
+	Source  string // daily_summary | search_hit | recent_raw
 	Content string
 }
 
 // 构建 chat 上下文（被 Chat / DebugChat 行为调用）
-// 注意：这里只负责“Prompt 组装”，不等于“记忆分层”
+// 注意：这里只负责“Prompt 组装”，不注入当前 user input
 func BuildChatContext(
 	cfg Config,
 	db *sql.DB,
 	date string,
-	userQuestion string,
+	userQuestion string, // 保留参数，仅用于 search
 ) []PromptBlock {
 
 	var ctx []PromptBlock
 
-	// 1️⃣ 今日 daily summary（长期抽象，只注入一次，不参与 search）
+	// 1️⃣ 今日 daily summary（长期抽象，只注入一次）
 	if daily := loadDailySummary(cfg, date); daily != "" {
 		ctx = append(ctx, PromptBlock{
 			Role:    "assistant",
@@ -68,7 +68,7 @@ func BuildChatContext(
 	}
 
 	// 3️⃣ 最近 raw 对话（短期工作上下文）
-	// ⚠️ 注意：这里只保留 user，绝不回流 assistant（防止风格污染）
+	// ⚠️ 只保留 user，彻底阻断 assistant 风格回流
 	if recent := loadRecentRaw(cfg, date, 20); recent != "" {
 		ctx = append(ctx, PromptBlock{
 			Role:    "assistant",
@@ -77,12 +77,8 @@ func BuildChatContext(
 		})
 	}
 
-	// 4️⃣ 当前用户输入（明确标注）
-	ctx = append(ctx, PromptBlock{
-		Role:    "user",
-		Source:  "user_input",
-		Content: userQuestion,
-	})
+	// ❌ 重要：不再注入当前 userQuestion
+	// user input 只允许通过真正的 user message 进入模型
 
 	return ctx
 }
@@ -100,10 +96,6 @@ func loadDailySummary(cfg Config, date string) string {
 }
 
 // 读取最近 raw 对话（干净版）
-// 设计原则：
-// - 只用于“对话连续性”
-// - 只保留 user 输入
-// - assistant 历史输出一律不回流（避免风格/兜底污染）
 func loadRecentRaw(cfg Config, date string, maxLines int) string {
 	path := filepath.Join(cfg.LogDir, date+".jsonl")
 	b, err := os.ReadFile(path)
@@ -132,7 +124,7 @@ func loadRecentRaw(cfg Config, date string, maxLines int) string {
 			continue
 		}
 
-		// ✅ 只保留 user，彻底阻断 assistant 风格回流
+		// ✅ 只保留 user
 		if m.Role == "user" {
 			out = append(out, "用户："+strings.TrimSpace(m.Content))
 		}

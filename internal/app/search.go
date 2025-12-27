@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 )
 
 /*
@@ -27,20 +29,39 @@ type SearchHit struct {
 
 /*
 ========================
+HTTP Client (avoid hang)
+========================
+*/
+
+var searchHTTPClient = &http.Client{
+	Timeout: 120 * time.Second,
+}
+
+/*
+========================
 Public Search API
 ========================
 */
 
 func SearchWithScore(db *sql.DB, cfg Config, query string) ([]SearchHit, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
 	// 1. embed query
 	qv, qn, err := embedText(query)
 	if err != nil {
 		return nil, err
 	}
+	// ✅ 防线：避免除 0 / NaN
+	if qn == 0 {
+		return nil, nil
+	}
 
 	// 2. load all embeddings
 	rows, err := db.Query(`
-		SELECT s.type, s.period_key, s.json, e.vec, e.l2
+		SELECT s.type, s.period_key, s.json, e.vec, e.l2, e.dim
 		FROM embeddings e
 		JOIN summaries s ON s.id = e.summary_id
 		WHERE e.model = ?
@@ -59,13 +80,31 @@ func SearchWithScore(db *sql.DB, cfg Config, query string) ([]SearchHit, error) 
 			js   string
 			blob []byte
 			l2   float64
+			dim  int
 		)
-		if err := rows.Scan(&typ, &key, &js, &blob, &l2); err != nil {
+		if err := rows.Scan(&typ, &key, &js, &blob, &l2, &dim); err != nil {
 			continue
 		}
 
-		dot := dotProduct(qv, blob)
+		// ✅ 防线：维度必须匹配，否则 dotProduct 会产生错误分数
+		if dim != len(qv) {
+			continue
+		}
+		// ✅ 防线：避免除 0
+		if l2 == 0 {
+			continue
+		}
+
+		dot, ok := dotProductExactDim(qv, blob, dim)
+		if !ok {
+			// blob 不完整/损坏，跳过
+			continue
+		}
+
 		score := dot / (qn * l2)
+		if math.IsNaN(score) || math.IsInf(score, 0) {
+			continue
+		}
 
 		if score < cfg.SearchMinScore {
 			continue
@@ -103,24 +142,40 @@ func embedText(text string) ([]float32, float64, error) {
 		"model": embedModel,
 		"input": text,
 	}
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, 0, err
+	}
 
-	resp, err := http.Post(embedURL, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequest("POST", embedURL, bytes.NewReader(b))
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := searchHTTPClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
 
+	// ✅ 必须检查状态码
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, 0, fmt.Errorf("embed http error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
 	var er embedResp
 	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
 		return nil, 0, err
 	}
-	if len(er.Data) == 0 {
+	if len(er.Data) == 0 || len(er.Data[0].Embedding) == 0 {
 		return nil, 0, fmt.Errorf("empty embedding")
 	}
 
 	vec := er.Data[0].Embedding
-	return vec, l2norm(vec), nil
+	n := l2norm(vec)
+	return vec, n, nil
 }
 
 /*
@@ -144,7 +199,7 @@ func extractHumanText(js string) string {
 		}
 	}
 
-	// memory_candidates
+	// memory_candidates（你 prompt 已禁止生成，但兼容旧数据）
 	if mems, ok := m["memory_candidates"].([]any); ok {
 		for _, mm := range mems {
 			if x, ok := mm.(map[string]any); ok {
@@ -171,15 +226,24 @@ Vector Math
 ========================
 */
 
-func dotProduct(q []float32, blob []byte) float64 {
-	buf := bytes.NewReader(blob)
-	var sum float64
-	for _, v := range q {
-		var x float32
-		_ = binary.Read(buf, binary.LittleEndian, &x)
-		sum += float64(v * x)
+// dotProductExactDim: 读取 blob 中 exactly dim 个 float32，与 q 做点积；
+// 任何读失败都返回 ok=false，避免“吞错导致分数乱飞”
+func dotProductExactDim(q []float32, blob []byte, dim int) (sum float64, ok bool) {
+	// 每个 float32 4 bytes
+	if len(blob) < dim*4 {
+		return 0, false
 	}
-	return sum
+
+	buf := bytes.NewReader(blob)
+
+	for i := 0; i < dim; i++ {
+		var x float32
+		if err := binary.Read(buf, binary.LittleEndian, &x); err != nil {
+			return 0, false
+		}
+		sum += float64(q[i] * x)
+	}
+	return sum, true
 }
 
 func l2norm(v []float32) float64 {

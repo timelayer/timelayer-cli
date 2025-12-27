@@ -39,7 +39,9 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 		yesterday := lw.currentDay
 
 		// ---------- DAILY ----------
-		_ = ensureDaily(lw.cfg, lw.db, yesterday, false)
+		if err := ensureDaily(lw.cfg, lw.db, yesterday, false); err != nil {
+			fmt.Println("[warn] ensureDaily failed:", err)
+		}
 
 		// ---------- WEEKLY ----------
 		yDate, _ := time.ParseInLocation("2006-01-02", yesterday, lw.cfg.Location)
@@ -50,7 +52,9 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 
 		if yYear != tYear || yWeek != tWeek {
 			weekKey := fmt.Sprintf("%04d-W%02d", yYear, yWeek)
-			_ = ensureWeekly(lw.cfg, lw.db, weekKey, false)
+			if err := ensureWeekly(lw.cfg, lw.db, weekKey, false); err != nil {
+				fmt.Println("[warn] ensureWeekly failed:", err)
+			}
 		}
 
 		// ---------- MONTHLY ----------
@@ -58,11 +62,15 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 		tMonth := tDate.Format("2006-01")
 
 		if yMonth != tMonth {
-			_ = ensureMonthly(lw.cfg, lw.db, yMonth, false)
+			if err := ensureMonthly(lw.cfg, lw.db, yMonth, false); err != nil {
+				fmt.Println("[warn] ensureMonthly failed:", err)
+			}
 		}
 
 		// ---------- ARCHIVE ----------
-		_ = forgetAndArchive(lw.cfg, lw.db)
+		if err := forgetAndArchive(lw.cfg, lw.db); err != nil {
+			fmt.Println("[warn] archive failed:", err)
+		}
 
 		if lw.file != nil {
 			_ = lw.file.Close()

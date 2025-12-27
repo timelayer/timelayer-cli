@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -23,6 +24,11 @@ type embedResp struct {
 	Data []struct {
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
+}
+
+// 本地默认超时：避免 embedding 请求卡死
+var embedHTTPClient = &http.Client{
+	Timeout: 120 * time.Second,
 }
 
 /*
@@ -47,17 +53,34 @@ func ensureEmbedding(db *sql.DB, cfg Config, text, typ, key string) error {
 		"model": embedModel,
 		"input": text,
 	}
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 
-	resp, err := http.Post(embedURL, "application/json", bytes.NewReader(b))
+	req, err := http.NewRequest("POST", embedURL, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := embedHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
+	// ✅ 必须检查状态码，否则 401/500 会被当成“空 embedding”
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("embedding http error %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
 	var er embedResp
-	_ = json.NewDecoder(resp.Body).Decode(&er)
-	if len(er.Data) == 0 {
+	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
+		return fmt.Errorf("decode embedding response failed: %w", err)
+	}
+	if len(er.Data) == 0 || len(er.Data[0].Embedding) == 0 {
 		return fmt.Errorf("empty embedding")
 	}
 
@@ -109,7 +132,17 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, reader *bufio.Reader, 
 /forget <fact>                explicitly retract a previously remembered fact
 
 /paste                        enter multi-line input (empty line submits)
+/debug <msg>                  print composed system prompt (no model call)
 `)
+
+		// ---------- DEBUG ----------
+	case strings.HasPrefix(input, "/debug"):
+		msg := strings.TrimSpace(strings.TrimPrefix(input, "/debug"))
+		if msg == "" {
+			fmt.Println("usage: /debug <msg>")
+			return
+		}
+		DebugChat(cfg, db, msg)
 
 	// ---------- PASTE ----------
 	case input == "/paste":
@@ -194,22 +227,37 @@ func handleCommand(cfg Config, db *sql.DB, lw *LogWriter, reader *bufio.Reader, 
 	case strings.HasPrefix(input, "/daily"):
 		force := strings.Contains(input, "--force")
 		today := time.Now().In(cfg.Location).Format("2006-01-02")
-		_ = ensureDaily(cfg, db, today, force)
-		fmt.Println("[ok] daily summary ensured:", today)
+
+		if err := ensureDaily(cfg, db, today, force); err != nil {
+			fmt.Println("daily error:", err)
+			return
+		}
+
+		if force {
+			fmt.Println("[ok] daily summary FORCE regenerated:", today)
+		} else {
+			fmt.Println("[ok] daily summary ensured:", today)
+		}
 
 	// ---------- WEEKLY ----------
 	case strings.HasPrefix(input, "/weekly"):
 		force := strings.Contains(input, "--force")
 		y, w := time.Now().In(cfg.Location).ISOWeek()
 		key := fmt.Sprintf("%04d-W%02d", y, w)
-		_ = ensureWeekly(cfg, db, key, force)
+		if err := ensureWeekly(cfg, db, key, force); err != nil {
+			fmt.Println("weekly error:", err)
+			return
+		}
 		fmt.Println("[ok] weekly summary ensured:", key)
 
 	// ---------- MONTHLY ----------
 	case strings.HasPrefix(input, "/monthly"):
 		force := strings.Contains(input, "--force")
 		key := time.Now().In(cfg.Location).Format("2006-01")
-		_ = ensureMonthly(cfg, db, key, force)
+		if err := ensureMonthly(cfg, db, key, force); err != nil {
+			fmt.Println("monthly error:", err)
+			return
+		}
 		fmt.Println("[ok] monthly summary ensured:", key)
 
 	// ---------- REINDEX ----------
