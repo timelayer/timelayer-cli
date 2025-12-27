@@ -1,10 +1,10 @@
 package app
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"time"
+	"unicode/utf8"
 )
 
 func mustEnsureDirs(cfg Config) {
@@ -12,27 +12,6 @@ func mustEnsureDirs(cfg Config) {
 	_ = os.MkdirAll(cfg.ArchiveDir, 0755)
 	_ = os.MkdirAll(cfg.PromptDir, 0755)
 	_ = os.MkdirAll(filepath.Dir(cfg.DBPath), 0755)
-}
-
-func readTailBytes(path string, maxBytes int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	size := st.Size()
-
-	start := int64(0)
-	if size > maxBytes {
-		start = size - maxBytes
-	}
-	_, _ = f.Seek(start, io.SeekStart)
-	return io.ReadAll(f)
 }
 
 // Week range: Monday..Sunday
@@ -57,4 +36,14 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// sanitizeUTF8 确保字符串是合法 UTF-8。
+// 如果包含非法字节，会通过 rune 重构，
+// 将非法部分替换为 �，避免污染日志与后续 JSON / Prompt。
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return string([]rune(s))
 }

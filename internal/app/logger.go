@@ -34,7 +34,7 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 	now := time.Now().In(lw.cfg.Location)
 	today := now.Format("2006-01-02")
 
-	// 跨天：先处理昨天
+	// ---------- 跨天处理 ----------
 	if lw.currentDay != "" && lw.currentDay != today {
 		yesterday := lw.currentDay
 
@@ -78,6 +78,7 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 		}
 	}
 
+	// ---------- 打开当天日志 ----------
 	if lw.file == nil {
 		_ = os.MkdirAll(lw.cfg.LogDir, 0755)
 		f, err := os.OpenFile(
@@ -92,7 +93,17 @@ func (lw *LogWriter) WriteRecord(rec map[string]string) error {
 		lw.currentDay = today
 	}
 
-	b, _ := json.Marshal(rec)
-	_, err := lw.file.Write(append(b, '\n'))
+	// ---------- ✅ UTF-8 清洗（关键修复点） ----------
+	clean := make(map[string]string, len(rec))
+	for k, v := range rec {
+		clean[k] = sanitizeUTF8(v)
+	}
+
+	b, err := json.Marshal(clean)
+	if err != nil {
+		return err
+	}
+
+	_, err = lw.file.Write(append(b, '\n'))
 	return err
 }

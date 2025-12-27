@@ -52,6 +52,9 @@ func Run() {
 			return
 		}
 
+		// ✅ UTF-8 清洗（关键修复点）
+		line = sanitizeUTF8(line)
+
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -82,6 +85,8 @@ func Run() {
 				fmt.Println("\n------------------\n")
 				continue
 			}
+			// ✅ 多行输入也清洗
+			input = sanitizeUTF8(input)
 		} else {
 			// 默认单行
 			input = line
@@ -145,6 +150,8 @@ func readMultiline(r *bufio.Reader) (string, error) {
 			return "", err
 		}
 
+		line = sanitizeUTF8(line)
+
 		if strings.TrimSpace(line) == "" {
 			break
 		}
@@ -164,6 +171,8 @@ func readUntilFence(r *bufio.Reader) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
+		line = sanitizeUTF8(line)
 
 		if strings.TrimSpace(line) == "```" {
 			break
